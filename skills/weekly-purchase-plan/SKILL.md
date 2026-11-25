@@ -55,28 +55,30 @@ From the `aging` export, group by `aging_owner`. Each owner gets one handoff lin
 
 ## Step 4. Build the workbook
 
-Use code (openpyxl) and the xlsx skill if it's available. File name: `Purchase_Plan_<planning date>.xlsx`. Arial 10 throughout, bold header rows with a light grey fill, freeze the header row, autofilter on every data tab, sensible column widths (reason and notes columns max 60, wrapped). Tabs in this order, exact names:
+Use code (openpyxl) and the xlsx skill if it's available. File name: `Purchase_Plan_<planning date>.xlsx`. Arial 10 throughout, bold header rows with a light grey fill, freeze the header row, autofilter on every data tab except PO Lines, sensible column widths (reason and notes columns max 60, wrapped). Tabs in this order, exact names:
 
 ### Summary
 - A1 `Purchase Plan: week of <planning date>` (bold, 14pt). A2 `Draft for approval. Nothing has been sent to LPs.`
-- **Key numbers** (label in A, value in B), as formulas pointing at the PO Lines tab, not typed numbers:
-  - PO lines `=COUNTA('PO Lines'!B:B)-1`
-  - Units `=SUM('PO Lines'!E:E)`
-  - Cost `=SUM('PO Lines'!I:I)` (format `$#,##0`)
-  - Urgent lines `=COUNTIF('PO Lines'!L:L,TRUE)`
+- **Key numbers** (label in A, value in B), all formulas, never typed numbers:
+  - PO lines `=COUNTIF('PO Lines'!A:A,"SKU-*")`
+  - Draft POs: `COUNTA` over the Draft POs by LP table's Draft PO column
+  - Units and Cost (format `$#,##0`): `SUM` over the Draft POs by LP table's Units and Cost columns
+  - Urgent lines `=COUNTIF('PO Lines'!K:K,TRUE)`
   - Lines needing review `=COUNTA(Review!B:B)-1`
   - High-priority review lines: `COUNTIF` on the Review tab's Priority column for "High"
-  - LPs with a PO: a count over the POs by LP table
 - **Executive summary:** the step 5 summary, one item per row (wrap text).
 - **Trouble LPs:** LP, Rank, Severity, Trouble reasons (joined with "; ", wrapped), PO cost, Urgent lines, Aged value (b4-5).
 - **Trouble brands:** Brand, Rank, Severity, Trouble reasons (wrapped), LP, Urgent lines, Aged value (b4-5).
 - Summary column widths: A 30, B 12, C 12, D 70, E 24, F 13, G 17. Every table starts in column A, so the reasons always sit in the wide column D.
-- **POs by LP:** LP, Lines, Units, Cost, Urgent, with `COUNTIF`/`SUMIF` formulas against PO Lines keyed on the LP name. Largest cost first.
+- **Draft POs by LP:** LP, Draft PO, ETA, Lines, Units, Cost, Urgent. One row per PO block, in the same order as the PO Lines tab (largest first). Lines and Urgent count that block's rows; Units and Cost link to that block's subtotal cells.
 
 ### PO Lines
-All `po_lines` rows, in export order. Columns A to N exactly as exported:
-`lp_name, sku, name, brand, order_qty, case_pack, cases, unit_cost, line_cost, wsoh_now, wsoh_after_order, urgent, review_flags, reason`
-Then O `Approve (Y/N)` and P `Approver notes`, blank with a yellow fill. Costs `$#,##0.00`, weeks `0.0`. Urgent rows get a light red fill.
+One block per draft PO, in export order (the export is already sorted largest PO first, urgent lines first within each PO). Header row 1 (frozen): `SKU, Product, Brand, Units, Case pack, Cases, Unit cost, Line cost, Wks now, Wks after, Urgent, Flags, Reason, Approve (Y/N), Approver notes` (columns A to O). No autofilter on this tab; it would break the blocks. For each `draft_po`:
+- **PO header row** (bold, light blue fill across A to O): A `draft_po`, B `lp_name`, C `Lead <lead_time_weeks> wks  |  ETA <expected_delivery>`
+- **Line rows:** sku, name, brand, order_qty, case_pack, cases, unit_cost, line_cost, wsoh_now, wsoh_after_order, urgent (TRUE/FALSE), review_flags, reason. Approve and notes cells blank with a yellow fill. Urgent rows get a light red fill. Costs `$#,##0.00`, weeks `0.0`, reason wrapped.
+- **Subtotal row** (bold, light grey fill): A `Subtotal`, B line count, D `=SUM` of units, F `=SUM` of cases, H `=SUM` of line cost, K count of urgent lines.
+- One blank row before the next PO.
+Column widths: A 16, B 34, C 22, D 8, E 10, F 7, G 10, H 12, I 8, J 9, K 8, L 22, M 60, N 14, O 30.
 
 ### Review
 All `review` rows, plus `Priority`, `Recommendation`, `Action owner`, and `Approver decision` (blank, yellow fill). Sort: High priority first (urgent, then no_similar_products, then case packs), then Normal by LP. Autofilter so the approver can show High only.
@@ -94,12 +96,12 @@ One handoff line per owner at the top (bold owner in A, text in B), a blank row,
 ### Checks before handing over
 - Recalculate; zero formula errors.
 - Summary cost equals the sum of `line_cost` in the po_lines export.
-- Row counts match the exports: PO Lines, Review and Aging.
+- Row counts match the exports: PO Lines lines, Review and Aging; one PO block per distinct `draft_po`.
 
 ## Step 5. Write the executive summary (in chat and on the Summary tab)
 
 Short and scannable, in this order:
-1. **One line:** "Week of <date>: <N> PO lines across <N> LPs, <units> units, $<cost>. <N> urgent."
+1. **One line:** "Week of <date>: <N> draft POs (one per LP), <N> lines, <units> units, $<cost>. <N> urgent."
 2. **Trouble LPs** (`is_trouble`, in rank order): one line each, name plus its trouble reasons.
 3. **Trouble brands:** same format.
 4. **Top 3 actions this week:** your judgment, 12 words or fewer each, naming the LP or brand. Pick from urgent stock-outs, the biggest aged-stock dollars, and launches needing confirmation.
