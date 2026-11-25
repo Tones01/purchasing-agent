@@ -475,23 +475,24 @@ export function registerTools(server: Server) {
     {
       title: "Export purchase plan (CSV)",
       description:
-        "Compact CSV export of one section of the plan, for building the workbook. Every line carries a standard reason written by code. Sections: po_lines (all reorder lines, grouped by LP), review (every line with a review flag, plus review decisions), aging (all aging actions), no_reorder (SKUs within 6 to 8 weeks or limited editions). Optional lp_id. Returns CSV text, header row first.",
+        "Compact CSV export of one section of the plan, for building the workbook. Every line carries a standard reason written by code. Sections: po_lines (all reorder lines, grouped by LP), review (every line with a review flag, plus review decisions), aging (aging actions; bucket 1 'watch' rows are left out unless include_watch is true), no_reorder (SKUs within 6 to 8 weeks or limited editions). Optional lp_id. Returns CSV text, header row first.",
       inputSchema: z.object({
         section: z.enum(["po_lines", "review", "aging", "no_reorder"]),
         lp_id: lpId.optional(),
+        include_watch: z.boolean().default(false).describe("Aging only: include bucket 1 (watch, no action) rows"),
       }),
       annotations: READ_ONLY,
     },
-    async ({ section, lp_id }) => {
+    async ({ section, lp_id, include_watch }) => {
       try {
         const csv = await withDb(async (sql) => {
           const lp = lp_id ?? null;
           const byLp = sql`(${lp}::int is null or lp_id = ${lp}::int)`;
           if (section === "po_lines") {
-            const rows = await sql`select lp_name, sku, name, brand, category, size, order_qty, case_pack, cases,
+            const rows = await sql`select lp_name, sku, name, brand, order_qty, case_pack, cases,
                 unit_cost, line_cost, wsoh_now, wsoh_after_order, urgent, review_flags, reason
               from v_plan_export where decision = 'reorder' and ${byLp} order by lp_name, urgent desc, sku`;
-            return toCsv(rows, ["lp_name", "sku", "name", "brand", "category", "size", "order_qty", "case_pack", "cases",
+            return toCsv(rows, ["lp_name", "sku", "name", "brand", "order_qty", "case_pack", "cases",
               "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent", "review_flags", "reason"]);
           }
           if (section === "review") {
@@ -506,7 +507,8 @@ export function registerTools(server: Server) {
           if (section === "aging") {
             const rows = await sql`select lp_name, sku, name, brand, status, wsoh_now, on_hand_units, open_po_units,
                 aging_bucket, aging_action, aging_owner, aged_value, promo_start, reason
-              from v_plan_export where decision = 'aging' and ${byLp} order by aging_bucket desc, aged_value desc, sku`;
+              from v_plan_export where decision = 'aging' and ${byLp} and (${include_watch}::boolean or aging_bucket > 1)
+              order by aging_bucket desc, aged_value desc, sku`;
             return toCsv(rows, ["lp_name", "sku", "name", "brand", "status", "wsoh_now", "on_hand_units", "open_po_units",
               "aging_bucket", "aging_action", "aging_owner", "aged_value", "promo_start", "reason"]);
           }
