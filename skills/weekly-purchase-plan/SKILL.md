@@ -1,6 +1,6 @@
 ---
 name: weekly-purchase-plan
-description: Build the weekly purchase plan review from the Purchasing Agent MCP server - an Excel workbook (POs by LP, flagged lines with recommendations, aging handoffs) plus a short executive summary that names trouble LPs and brands. Use when asked for the purchase plan, a PO review, reorder recommendations, or a purchasing workbook.
+description: Build the weekly purchase plan review from the Purchasing Agent MCP server: Excel workbook plus a short executive summary naming trouble LPs and brands. Use for purchase plans, PO reviews or reorder recommendations.
 ---
 
 # Weekly purchase plan review
