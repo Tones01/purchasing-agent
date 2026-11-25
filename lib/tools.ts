@@ -504,7 +504,7 @@ export function registerTools(server: Server) {
               join lps l on l.id = e.lp_id
               join po on po.lp_id = e.lp_id
               cross join cfg
-              where e.decision = 'reorder' and ${byLp}
+              where e.decision = 'reorder' and (${lp}::int is null or e.lp_id = ${lp}::int)
               order by po.po_cost desc, e.lp_id, e.urgent desc, e.line_cost desc, e.sku`;
             return toCsv(rows, ["draft_po", "lp_name", "lead_time_weeks", "expected_delivery", "sku", "name", "brand",
               "order_qty", "case_pack", "cases", "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent",
