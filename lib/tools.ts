@@ -496,11 +496,11 @@ export function registerTools(server: Server) {
               "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent", "review_flags", "reason"]);
           }
           if (section === "review") {
-            const rows = await sql`select lp_name, sku, name, brand, lifecycle, decision, review_flags, wsoh_now, plan_velocity,
+            const rows = await sql`select lp_name, sku, name, brand, category, lifecycle, decision, review_flags, wsoh_now, plan_velocity,
                 similar_count, promo_start, promo_lift, lift_source, promo_extra_units, order_qty, case_pack, line_cost, reason
               from v_plan_export where (cardinality(review_flags) > 0 or decision = 'review') and ${byLp}
               order by lp_name, sku`;
-            return toCsv(rows, ["lp_name", "sku", "name", "brand", "lifecycle", "decision", "review_flags", "wsoh_now",
+            return toCsv(rows, ["lp_name", "sku", "name", "brand", "category", "lifecycle", "decision", "review_flags", "wsoh_now",
               "plan_velocity", "similar_count", "promo_start", "promo_lift", "lift_source", "promo_extra_units", "order_qty",
               "case_pack", "line_cost", "reason"]);
           }
