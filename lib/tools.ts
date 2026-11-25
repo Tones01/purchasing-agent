@@ -39,7 +39,8 @@ const METRIC_DEFINITIONS = {
 };
 
 function ok(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+  // Compact JSON: about 25% fewer tokens than pretty-printed.
+  return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
 function fail(message: string) {
@@ -252,26 +253,42 @@ export function registerTools(server: Server) {
     {
       title: "Overstock",
       description:
-        "SKUs with more than min_wsoh weeks of stock (default 8), plus SKUs holding stock with no sales at all (zero baseline velocity), including delisted ones. New and upcoming launches are left out. Input for the aging agent.",
+        "SKUs with more than min_wsoh weeks of stock (default 8), plus SKUs holding stock with no sales at all (zero baseline velocity), including delisted ones. New and upcoming launches are left out. Input for the aging agent. Paged: returns a summary of all matches (by WSOH band) plus up to `limit` rows from `offset`. Filter by lp_id to keep results small.",
       inputSchema: z.object({
         lp_id: lpId.optional(),
         min_wsoh: z.number().positive().default(8).describe("Weeks of stock threshold (default 8)"),
+        limit: z.number().int().min(1).max(100).default(50).describe("Rows per page (default 50, max 100)"),
+        offset: z.number().int().min(0).default(0).describe("Rows to skip, for the next page"),
       }),
       annotations: READ_ONLY,
     },
-    async ({ lp_id, min_wsoh }) =>
+    async ({ lp_id, min_wsoh, limit, offset }) =>
       run(async () => {
-        const rows = await sql`
-          select sku, name, brand, lp_id, lp_name, category, status, lifecycle,
-            baseline_velocity::float8 as baseline_velocity, on_hand_units::int as on_hand_units, open_po_units::int as open_po_units,
-            wsoh_now::float8 as wsoh_now, next_promo_start::text as next_promo_start, is_limited_edition
+        const lp = lp_id ?? null;
+        const match = sql`
           from v_sku_metrics
           where lifecycle in ('established', 'delisted')
-            and (${lp_id ?? null}::int is null or lp_id = ${lp_id ?? null}::int)
+            and (${lp}::int is null or lp_id = ${lp}::int)
             and (wsoh_now > ${min_wsoh}
-                 or (on_hand_units + open_po_units > 0 and coalesce(baseline_velocity, 0) = 0))
-          order by wsoh_now desc nulls first, sku`;
-        return { min_wsoh, sku_count: rows.length, skus: rows };
+                 or (on_hand_units + open_po_units > 0 and coalesce(baseline_velocity, 0) = 0))`;
+        const [[summary], rows] = await Promise.all([
+          sql`select count(*)::int as total,
+                count(*) filter (where wsoh_now > 8 and wsoh_now <= 10)::int as wsoh_8_to_10,
+                count(*) filter (where wsoh_now > 10 and wsoh_now <= 13)::int as wsoh_10_to_13,
+                count(*) filter (where wsoh_now > 13 and wsoh_now <= 17)::int as wsoh_13_to_17,
+                count(*) filter (where wsoh_now > 17 and wsoh_now <= 26)::int as wsoh_17_to_26,
+                count(*) filter (where wsoh_now > 26)::int as wsoh_over_26,
+                count(*) filter (where wsoh_now is null or coalesce(baseline_velocity, 0) = 0)::int as no_sales_with_stock
+              ${match}`,
+          sql`select sku, name, brand, lp_id, category, status, lifecycle,
+                baseline_velocity::float8 as baseline_velocity, on_hand_units::int as on_hand_units, open_po_units::int as open_po_units,
+                wsoh_now::float8 as wsoh_now, next_promo_start::text as next_promo_start, is_limited_edition
+              ${match}
+              order by wsoh_now desc nulls first, sku
+              limit ${limit} offset ${offset}`,
+        ]);
+        const nextOffset = offset + rows.length < summary.total ? offset + rows.length : null;
+        return { min_wsoh, summary, offset, returned: rows.length, next_offset: nextOffset, skus: rows };
       }),
   );
 
