@@ -357,25 +357,27 @@ export function registerTools(server: Server) {
     },
     async () =>
       run(async (sql) => {
-        const [byDecision, byLp, aging, flags] = await Promise.all([
-          sql`select decision, count(*)::int as skus, coalesce(sum(order_qty), 0)::int as units,
+        // One round trip: the plan is calculated once and every summary is built from it.
+        const [row] = await sql`
+          with p as materialized (select * from v_purchase_plan)
+          select
+            (select coalesce(json_agg(x order by x.decision), '[]') from (
+              select decision, count(*)::int as skus, coalesce(sum(order_qty), 0)::int as units,
                 round(sum(line_cost)::numeric, 2)::float8 as cost,
                 count(*) filter (where cardinality(review_flags) > 0)::int as needs_review
-              from v_purchase_plan group by decision order by decision`,
-          sql`select lp_id, lp_name, count(*)::int as po_lines, sum(order_qty)::int as units,
+              from p group by decision) x) as by_decision,
+            (select coalesce(json_agg(x order by x.cost desc), '[]') from (
+              select lp_id, lp_name, count(*)::int as po_lines, sum(order_qty)::int as units,
                 round(sum(line_cost)::numeric, 2)::float8 as cost,
                 count(*) filter (where urgent)::int as urgent_lines,
                 count(*) filter (where cardinality(review_flags) > 0)::int as lines_needing_review
-              from v_purchase_plan where decision = 'reorder'
-              group by lp_id, lp_name order by cost desc`,
-          sql`select aging_bucket, aging_action, aging_owner, count(*)::int as skus
-              from v_purchase_plan where decision = 'aging'
-              group by aging_bucket, aging_action, aging_owner order by aging_bucket, aging_action`,
-          sql`select flag, count(*)::int as skus
-              from v_purchase_plan, unnest(review_flags) as flag
-              group by flag order by skus desc`,
-        ]);
-        return { by_decision: byDecision, purchase_orders_by_lp: byLp, aging_actions: aging, review_flags: flags };
+              from p where decision = 'reorder' group by lp_id, lp_name) x) as purchase_orders_by_lp,
+            (select coalesce(json_agg(x order by x.aging_bucket, x.aging_action), '[]') from (
+              select aging_bucket, aging_action, aging_owner, count(*)::int as skus
+              from p where decision = 'aging' group by aging_bucket, aging_action, aging_owner) x) as aging_actions,
+            (select coalesce(json_agg(x order by x.skus desc), '[]') from (
+              select flag, count(*)::int as skus from p, unnest(review_flags) as flag group by flag) x) as review_flags`;
+        return row;
       }),
   );
 
