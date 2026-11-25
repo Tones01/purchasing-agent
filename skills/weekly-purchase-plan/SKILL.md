@@ -43,7 +43,7 @@ For each row in the `review` export, write a **Recommendation** (12 words max) a
 
 If a line has several flags, lead with the most serious: urgent, then no_similar_products, then dead stock (no_sales_with_stock, bucket_5), then the rest.
 
-Set **Priority** to `High` when the lead flag is urgent, no_similar_products, no_sales_with_stock, bucket_5 or case_pack_overshoot. Everything else is `Normal` (the approver can skim those).
+Set **Priority** to `High` when the line must be decided before POs go out: lead flag urgent, no_similar_products or case_pack_overshoot. Everything else is `Normal`. Dead stock (no_sales_with_stock, bucket_5) is Normal here because the Aging tab handles it as one bulk clearance decision.
 
 ## Step 3. Turn aging into handoffs
 
@@ -79,7 +79,7 @@ All `po_lines` rows, in export order. Columns A to N exactly as exported:
 Then O `Approve (Y/N)` and P `Approver notes`, blank with a yellow fill. Costs `$#,##0.00`, weeks `0.0`. Urgent rows get a light red fill.
 
 ### Review
-All `review` rows, plus `Priority`, `Recommendation`, `Action owner`, and `Approver decision` (blank, yellow fill). Sort: High priority first (urgent, then no_similar_products, then dead stock, then case packs), then Normal by LP. Autofilter so the approver can show High only.
+All `review` rows, plus `Priority`, `Recommendation`, `Action owner`, and `Approver decision` (blank, yellow fill). Sort: High priority first (urgent, then no_similar_products, then case packs), then Normal by LP. Autofilter so the approver can show High only.
 
 ### Aging
 One handoff line per owner at the top (bold owner in A, text in B), a blank row, then all `aging` rows with headers. `aged_value` as `$#,##0`.
