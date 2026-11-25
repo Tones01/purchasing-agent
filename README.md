@@ -10,13 +10,21 @@ This is part one of a portfolio project on AI operations: building agent tools, 
 Claude / agent SDK  ──>  MCP server (this repo, on Vercel)  ──>  Supabase Postgres (read-only role)
 ```
 
-- **Agents decide.** Reorder triggers, targets, rounding, promo buys, aging actions and the written reasons.
-- **Code calculates.** Sales speed, trend, weeks of stock and promo lift are calculated in database views, so agents never do arithmetic over hundreds of rows. That makes the results cheaper and repeatable, and you can test them.
+**Hybrid design: code runs the rules, AI handles judgment.**
+
+- **Code (database views):** sales speed, trend, weeks of stock, promo lift, and the full purchase plan: reorder trigger, target weeks, promo forward buy, launch quantities from similar products, case pack rounding, urgent flag, aging buckets. Same input, same answer, every time, at $0 per run.
+- **AI (agents):** reviews only the lines the engine flags (urgent, promo, new launch, no similar products, oversized case pack, limited edition, dead stock), writes the plain-English reason on each line, routes aging actions, and answers the approver's questions.
+
+This keeps runs cheap, makes the math testable with ordinary checks, and points the evals at the judgment calls.
+
+All database code is in [`supabase/migrations`](supabase/migrations). The purchase plan engine is [`0005_purchase_plan_engine.sql`](supabase/migrations/0005_purchase_plan_engine.sql).
 
 ## Tools
 
 | Tool | What it returns | Main user |
 |---|---|---|
+| `get_purchase_plan_summary` | Plan totals by decision, PO totals by LP, aging actions, review flag counts | Orchestrator |
+| `get_purchase_plan` | Plan lines with decision, quantities, rounding, cost, urgent, aging and review flags (paged, filterable) | All agents |
 | `get_planning_context` | Planning date, history window, lead time, metric definitions | Orchestrator |
 | `list_lps` | Suppliers with lead times, brands, active SKUs, open POs | Orchestrator |
 | `get_lp_stock_overview` | Per-SKU sales speed, trend, top seller flag, stock, weeks on hand now and at arrival | Demand + supply agents |
@@ -36,6 +44,24 @@ Claude / agent SDK  ──>  MCP server (this repo, on Vercel)  ──>  Supabas
 - **Weeks of stock now:** (on hand + open POs) / baseline velocity.
 - **Projected at arrival:** stock left when a PO placed today lands (planned at end of week 2), in units and weeks.
 - **Promo lift:** promo-week units / the 4 normal weeks before the promo.
+
+## Rule checks (current run)
+
+Every rule is checked across every SKU, not a sample. All pass:
+
+- Order quantities are whole case packs
+- Reorders land between 6 and 8 weeks (plus promo weeks), unless the case pack is too large (flagged)
+- 6 to 8 weeks with no promo: no reorder. Under 6: reorder. Over 8: aging, never reorder
+- Targets: top seller 8, trending up 8, slowing 6, flat 7. Launches: 6 off similar products
+- Launches with no similar products are flagged; upcoming launches are always listed
+- Limited editions, delisted SKUs and flow-through-only SKUs are never reordered
+- Promo extra units = (lift - 1) x velocity x promo weeks, always flagged
+- Aging bucket matches the weeks-of-stock band
+
+## Reliability
+
+- One short-lived database connection per tool call. Serverless functions freeze between requests, and long-lived connections die during the freeze and hang the next call.
+- 20-second query timeout inside the server, so a stuck call fails fast with a clear error.
 
 ## Security
 

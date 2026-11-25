@@ -1,4 +1,6 @@
 const tools = [
+  ["get_purchase_plan_summary", "This week's plan: totals by decision, POs by LP, aging actions, review flags"],
+  ["get_purchase_plan", "Plan lines with quantities, rounding, cost, urgent and review flags"],
   ["get_planning_context", "Planning date, history window, lead time and metric definitions"],
   ["list_lps", "Suppliers with lead times, brands, active SKUs and open POs"],
   ["get_lp_stock_overview", "Reorder screening: sales speed, trend, stock and weeks on hand per SKU"],

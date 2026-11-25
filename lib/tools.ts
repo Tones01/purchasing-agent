@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { createMcpHandler } from "mcp-handler";
-import { db } from "./db";
+import { withDb, type Sql } from "./db";
 
 type Server = Parameters<Parameters<typeof createMcpHandler>[0]>[0];
 
@@ -47,9 +47,12 @@ function fail(message: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ error: message }) }], isError: true };
 }
 
-async function run(fn: () => Promise<unknown>) {
+type Cols = ReturnType<Sql["unsafe"]>;
+
+// Runs one tool call on its own short-lived connection (see lib/db.ts).
+async function run(fn: (sql: Sql, cols: Cols) => Promise<unknown>) {
   try {
-    return ok(await fn());
+    return ok(await withDb((sql) => fn(sql, sql.unsafe(METRIC_COLS))));
   } catch (err) {
     console.error(err);
     return fail(err instanceof Error ? err.message : "Unexpected error");
@@ -60,9 +63,6 @@ const sku = z.string().regex(/^SKU-\d{5}$/, "SKU format is SKU-00000").describe(
 const lpId = z.number().int().positive().describe("LP id from list_lps");
 
 export function registerTools(server: Server) {
-  const sql = db();
-  const cols = sql.unsafe(METRIC_COLS);
-
   server.registerTool(
     "get_planning_context",
     {
@@ -73,7 +73,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async () =>
-      run(async () => {
+      run(async (sql, cols) => {
         const config = await sql`select key, value, note from planning_config order by key`;
         return { config, metric_definitions: METRIC_DEFINITIONS };
       }),
@@ -90,7 +90,7 @@ export function registerTools(server: Server) {
     },
     async () =>
       run(
-        () => sql`
+        (sql) => sql`
           select l.id, l.name, l.lead_time_weeks,
             (select array_agg(b2.name order by b2.name) from brands b2 where b2.lp_id = l.id) as brands,
             count(distinct p.sku) filter (where p.status = 'active')::int as active_skus,
@@ -116,7 +116,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ lp_id, include_delisted }) =>
-      run(async () => {
+      run(async (sql, cols) => {
         const rows = await sql`
           select ${cols} from v_sku_metrics
           where lp_id = ${lp_id} and (${include_delisted} or status = 'active')
@@ -135,7 +135,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ sku }) =>
-      run(async () => {
+      run(async (sql, cols) => {
         const [metrics] = await sql`select ${cols} from v_sku_metrics where sku = ${sku}`;
         if (!metrics) throw new Error(`Unknown SKU ${sku}`);
         const [history, flowThrough, promos, openPoLines] = await Promise.all([
@@ -163,7 +163,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ sku }) =>
-      run(async () => {
+      run(async (sql, cols) => {
         const [target] = await sql`select sku, brand, brand_id, category, size, lifecycle from v_sku_metrics where sku = ${sku}`;
         if (!target) throw new Error(`Unknown SKU ${sku}`);
         const similar = await sql`
@@ -195,7 +195,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ sku }) =>
-      run(async () => {
+      run(async (sql, cols) => {
         const [product] = await sql`select sku, brand_id from products where sku = ${sku}`;
         if (!product) throw new Error(`Unknown SKU ${sku}`);
         const [own, brand, upcoming] = await Promise.all([
@@ -236,7 +236,7 @@ export function registerTools(server: Server) {
     },
     async ({ lp_id }) =>
       run(
-        () => sql`
+        (sql) => sql`
           select pr.sku, m.name, m.brand, m.lp_id, pr.start_date::text as start_date, pr.end_date::text as end_date,
             pr.discount_pct::float8 as discount_pct, pr.funded_by,
             m.baseline_velocity::float8 as baseline_velocity, m.wsoh_now::float8 as wsoh_now,
@@ -263,7 +263,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ lp_id, min_wsoh, limit, offset }) =>
-      run(async () => {
+      run(async (sql, cols) => {
         const lp = lp_id ?? null;
         const match = sql`
           from v_sku_metrics
@@ -302,7 +302,7 @@ export function registerTools(server: Server) {
     },
     async ({ lp_id }) =>
       run(
-        () => sql`
+        (sql) => sql`
           select o.po_number, o.lp_id, l.name as lp_name, o.order_date::text as order_date,
             o.expected_delivery::text as expected_delivery,
             json_agg(json_build_object('sku', pl.sku, 'qty', pl.qty, 'order_type', pl.order_type, 'store_id', pl.store_id)
@@ -331,7 +331,7 @@ export function registerTools(server: Server) {
       annotations: READ_ONLY,
     },
     async ({ query, lp_id, category, lifecycle, limit }) =>
-      run(() => {
+      run((sql) => {
         const pattern = query ? `%${query}%` : null;
         return sql`
           select sku, name, brand, lp_id, lp_name, category, size, lifecycle, status,
@@ -343,6 +343,86 @@ export function registerTools(server: Server) {
             and (${lifecycle ?? null}::text is null or lifecycle = ${lifecycle ?? null}::text)
           order by sku
           limit ${limit}`;
+      }),
+  );
+
+  server.registerTool(
+    "get_purchase_plan_summary",
+    {
+      title: "Purchase plan summary",
+      description:
+        "Start of the weekly review. The purchase plan is calculated by the rules engine in the database (trigger, target, promo forward buy, launch quantities, case pack rounding, urgent flag, aging buckets). Returns totals by decision, PO totals by LP (lines, units, cost, urgent, lines needing review), aging counts by bucket, and counts of each review flag.",
+      inputSchema: z.object({}),
+      annotations: READ_ONLY,
+    },
+    async () =>
+      run(async (sql) => {
+        const [byDecision, byLp, aging, flags] = await Promise.all([
+          sql`select decision, count(*)::int as skus, coalesce(sum(order_qty), 0)::int as units,
+                round(sum(line_cost)::numeric, 2)::float8 as cost,
+                count(*) filter (where cardinality(review_flags) > 0)::int as needs_review
+              from v_purchase_plan group by decision order by decision`,
+          sql`select lp_id, lp_name, count(*)::int as po_lines, sum(order_qty)::int as units,
+                round(sum(line_cost)::numeric, 2)::float8 as cost,
+                count(*) filter (where urgent)::int as urgent_lines,
+                count(*) filter (where cardinality(review_flags) > 0)::int as lines_needing_review
+              from v_purchase_plan where decision = 'reorder'
+              group by lp_id, lp_name order by cost desc`,
+          sql`select aging_bucket, aging_action, aging_owner, count(*)::int as skus
+              from v_purchase_plan where decision = 'aging'
+              group by aging_bucket, aging_action, aging_owner order by aging_bucket, aging_action`,
+          sql`select flag, count(*)::int as skus
+              from v_purchase_plan, unnest(review_flags) as flag
+              group by flag order by skus desc`,
+        ]);
+        return { by_decision: byDecision, purchase_orders_by_lp: byLp, aging_actions: aging, review_flags: flags };
+      }),
+  );
+
+  server.registerTool(
+    "get_purchase_plan",
+    {
+      title: "Purchase plan lines",
+      description:
+        "Line-level purchase plan from the rules engine. Each line has the decision (reorder, no_reorder, aging, review), the velocity used and its source, target weeks and why, promo lift and extra units, raw and rounded order quantity with the rounding note, weeks of stock after the order, line cost, urgent flag, aging bucket/action/owner, and review_flags. Filter by LP, decision, or only lines with review flags. Paged.",
+      inputSchema: z.object({
+        lp_id: lpId.optional(),
+        decision: z.enum(["reorder", "no_reorder", "aging", "review"]).optional(),
+        needs_review_only: z.boolean().default(false).describe("Only lines with at least one review flag"),
+        flag: z
+          .enum(["urgent", "promo", "new_launch", "upcoming_launch", "no_similar_products", "case_pack_overshoot",
+                 "limited_edition_low", "no_sales_with_stock", "bucket_5"])
+          .optional()
+          .describe("Only lines carrying this review flag"),
+        limit: z.number().int().min(1).max(100).default(50),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ lp_id, decision, needs_review_only, flag, limit, offset }) =>
+      run(async (sql) => {
+        const lp = lp_id ?? null;
+        const dec = decision ?? null;
+        const fl = flag ?? null;
+        const where = sql`
+          where (${lp}::int is null or lp_id = ${lp}::int)
+            and (${dec}::text is null or decision = ${dec}::text)
+            and (not ${needs_review_only}::boolean or cardinality(review_flags) > 0)
+            and (${fl}::text is null or ${fl}::text = any(review_flags))`;
+        const [[count], rows] = await Promise.all([
+          sql`select count(*)::int as total from v_purchase_plan ${where}`,
+          sql`select sku, name, brand, lp_id, category, size, lifecycle, decision,
+                plan_velocity, velocity_source, similar_count, trend_pct, is_top_seller,
+                on_hand_units, open_po_units, wsoh_now, target_weeks, target_reason,
+                promo_start, promo_lift, lift_source, promo_extra_units,
+                raw_qty, case_pack, order_qty, rounding_note, wsoh_after_order, line_cost,
+                urgent, aging_bucket, aging_action, aging_owner, review_flags
+              from v_purchase_plan ${where}
+              order by lp_id, decision, urgent desc, sku
+              limit ${limit} offset ${offset}`,
+        ]);
+        const nextOffset = offset + rows.length < count.total ? offset + rows.length : null;
+        return { total: count.total, offset, returned: rows.length, next_offset: nextOffset, lines: rows };
       }),
   );
 }
