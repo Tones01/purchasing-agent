@@ -43,6 +43,21 @@ function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 }
 
+
+function okText(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+// Minimal CSV writer: quotes fields containing commas, quotes or newlines; arrays joined with "|".
+function toCsv(rows: Record<string, unknown>[], columns: string[]): string {
+  const cell = (v: unknown) => {
+    if (v === null || v === undefined) return "";
+    const s = Array.isArray(v) ? v.join("|") : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [columns.join(","), ...rows.map((r) => columns.map((c) => cell(r[c])).join(","))].join("\n");
+}
+
 function fail(message: string) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ error: message }) }], isError: true };
 }
@@ -426,5 +441,84 @@ export function registerTools(server: Server) {
         const nextOffset = offset + rows.length < count.total ? offset + rows.length : null;
         return { total: count.total, offset, returned: rows.length, next_offset: nextOffset, lines: rows };
       }),
+  );
+
+  server.registerTool(
+    "get_partner_health",
+    {
+      title: "LP and brand health",
+      description:
+        "Health check per LP and per brand, calculated by code: active SKUs, PO lines/units/cost, urgent lines, SKUs over 8 weeks, aged stock value in buckets 4-5, dead stock, case pack issues, stockouts, a severity score and rank, plain-language trouble_reasons, and is_trouble (top 5 LPs and top 8 brands that have at least one trouble reason). Use it for the executive summary's trouble list.",
+      inputSchema: z.object({
+        level: z.enum(["lp", "brand", "both"]).default("both"),
+        trouble_only: z.boolean().default(true).describe("Only rows marked is_trouble (default true)"),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ level, trouble_only }) =>
+      run(async (sql) => {
+        const lv = level === "both" ? null : level;
+        const rows = await sql`
+          select level, lp_id, brand_id, name, lp_name, severity_rank::int as severity_rank, severity_score, is_trouble,
+            trouble_reasons, active_skus, reorder_lines, po_units, po_cost, urgent_lines, over_8_wks_skus,
+            aged_value_b4_b5, dead_stock_skus, case_pack_issues, stockout_skus, review_lines
+          from v_partner_health
+          where (${lv}::text is null or level = ${lv}::text)
+            and (not ${trouble_only}::boolean or is_trouble)
+          order by level desc, severity_rank, name`;
+        return { rows };
+      }),
+  );
+
+  server.registerTool(
+    "export_purchase_plan",
+    {
+      title: "Export purchase plan (CSV)",
+      description:
+        "Compact CSV export of one section of the plan, for building the workbook. Every line carries a standard reason written by code. Sections: po_lines (all reorder lines, grouped by LP), review (every line with a review flag, plus review decisions), aging (all aging actions), no_reorder (SKUs within 6 to 8 weeks or limited editions). Optional lp_id. Returns CSV text, header row first.",
+      inputSchema: z.object({
+        section: z.enum(["po_lines", "review", "aging", "no_reorder"]),
+        lp_id: lpId.optional(),
+      }),
+      annotations: READ_ONLY,
+    },
+    async ({ section, lp_id }) => {
+      try {
+        const csv = await withDb(async (sql) => {
+          const lp = lp_id ?? null;
+          const byLp = sql`(${lp}::int is null or lp_id = ${lp}::int)`;
+          if (section === "po_lines") {
+            const rows = await sql`select lp_name, sku, name, brand, category, size, order_qty, case_pack, cases,
+                unit_cost, line_cost, wsoh_now, wsoh_after_order, urgent, review_flags, reason
+              from v_plan_export where decision = 'reorder' and ${byLp} order by lp_name, urgent desc, sku`;
+            return toCsv(rows, ["lp_name", "sku", "name", "brand", "category", "size", "order_qty", "case_pack", "cases",
+              "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent", "review_flags", "reason"]);
+          }
+          if (section === "review") {
+            const rows = await sql`select lp_name, sku, name, brand, lifecycle, decision, review_flags, wsoh_now, plan_velocity,
+                similar_count, promo_start, promo_lift, lift_source, promo_extra_units, order_qty, case_pack, line_cost, reason
+              from v_plan_export where (cardinality(review_flags) > 0 or decision = 'review') and ${byLp}
+              order by lp_name, sku`;
+            return toCsv(rows, ["lp_name", "sku", "name", "brand", "lifecycle", "decision", "review_flags", "wsoh_now",
+              "plan_velocity", "similar_count", "promo_start", "promo_lift", "lift_source", "promo_extra_units", "order_qty",
+              "case_pack", "line_cost", "reason"]);
+          }
+          if (section === "aging") {
+            const rows = await sql`select lp_name, sku, name, brand, status, wsoh_now, on_hand_units, open_po_units,
+                aging_bucket, aging_action, aging_owner, aged_value, promo_start, reason
+              from v_plan_export where decision = 'aging' and ${byLp} order by aging_bucket desc, aged_value desc, sku`;
+            return toCsv(rows, ["lp_name", "sku", "name", "brand", "status", "wsoh_now", "on_hand_units", "open_po_units",
+              "aging_bucket", "aging_action", "aging_owner", "aged_value", "promo_start", "reason"]);
+          }
+          const rows = await sql`select lp_name, sku, name, brand, wsoh_now, is_limited_edition, reason
+            from v_plan_export where decision = 'no_reorder' and ${byLp} order by lp_name, sku`;
+          return toCsv(rows, ["lp_name", "sku", "name", "brand", "wsoh_now", "is_limited_edition", "reason"]);
+        });
+        return okText(csv);
+      } catch (err) {
+        console.error(err);
+        return fail(err instanceof Error ? err.message : "Unexpected error");
+      }
+    },
   );
 }
