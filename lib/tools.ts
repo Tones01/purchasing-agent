@@ -475,7 +475,7 @@ export function registerTools(server: Server) {
     {
       title: "Export purchase plan (CSV)",
       description:
-        "Compact CSV export of one section of the plan, for building the workbook. Every line carries a standard reason written by code. Sections: po_lines (all reorder lines, grouped by LP), review (every line with a review flag, plus review decisions), aging (aging actions; bucket 1 'watch' rows are left out unless include_watch is true), no_reorder (SKUs within 6 to 8 weeks or limited editions). Optional lp_id. Returns CSV text, header row first.",
+        "Compact CSV export of one section of the plan, for building the workbook. Every line carries a standard reason written by code. Sections: po_lines (all reorder lines as one draft PO per LP, largest PO first, with draft PO number, lead time and expected delivery), review (every line with a review flag, plus review decisions), aging (aging actions; bucket 1 'watch' rows are left out unless include_watch is true), no_reorder (SKUs within 6 to 8 weeks or limited editions). Optional lp_id. Returns CSV text, header row first.",
       inputSchema: z.object({
         section: z.enum(["po_lines", "review", "aging", "no_reorder"]),
         lp_id: lpId.optional(),
@@ -489,11 +489,26 @@ export function registerTools(server: Server) {
           const lp = lp_id ?? null;
           const byLp = sql`(${lp}::int is null or lp_id = ${lp}::int)`;
           if (section === "po_lines") {
-            const rows = await sql`select lp_name, sku, name, brand, order_qty, case_pack, cases,
-                unit_cost, line_cost, wsoh_now, wsoh_after_order, urgent, review_flags, reason
-              from v_plan_export where decision = 'reorder' and ${byLp} order by lp_name, urgent desc, sku`;
-            return toCsv(rows, ["lp_name", "sku", "name", "brand", "order_qty", "case_pack", "cases",
-              "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent", "review_flags", "reason"]);
+            // One draft PO per LP. PO number, lead time and expected delivery come from code.
+            const rows = await sql`
+              with cfg as (select value::date as as_of from planning_config where key = 'as_of_date'),
+              po as (
+                select e.lp_id, sum(e.line_cost) as po_cost
+                from v_plan_export e where e.decision = 'reorder' group by e.lp_id
+              )
+              select 'DRAFT-' || to_char(cfg.as_of, 'MMDD') || '-' || lpad(e.lp_id::text, 2, '0') as draft_po,
+                e.lp_name, l.lead_time_weeks, (cfg.as_of + 7 * l.lead_time_weeks)::text as expected_delivery,
+                e.sku, e.name, e.brand, e.order_qty, e.case_pack, e.cases, e.unit_cost, e.line_cost,
+                e.wsoh_now, e.wsoh_after_order, e.urgent, e.review_flags, e.reason
+              from v_plan_export e
+              join lps l on l.id = e.lp_id
+              join po on po.lp_id = e.lp_id
+              cross join cfg
+              where e.decision = 'reorder' and ${byLp}
+              order by po.po_cost desc, e.lp_id, e.urgent desc, e.line_cost desc, e.sku`;
+            return toCsv(rows, ["draft_po", "lp_name", "lead_time_weeks", "expected_delivery", "sku", "name", "brand",
+              "order_qty", "case_pack", "cases", "unit_cost", "line_cost", "wsoh_now", "wsoh_after_order", "urgent",
+              "review_flags", "reason"]);
           }
           if (section === "review") {
             const rows = await sql`select lp_name, sku, name, brand, category, lifecycle, decision, review_flags, wsoh_now, plan_velocity,
