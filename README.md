@@ -23,6 +23,8 @@ All database code is in [`supabase/migrations`](supabase/migrations). The purcha
 
 | Tool | What it returns | Main user |
 |---|---|---|
+| `get_partner_health` | LP and brand health: urgent lines, overstock, aged stock $, dead stock, trouble reasons, severity rank | Exec summary |
+| `export_purchase_plan` | Compact CSV of PO lines, review lines or aging, each with a standard reason written by code | Workbook builder |
 | `get_purchase_plan_summary` | Plan totals by decision, PO totals by LP, aging actions, review flag counts | Orchestrator |
 | `get_purchase_plan` | Plan lines with decision, quantities, rounding, cost, urgent, aging and review flags (paged, filterable) | All agents |
 | `get_planning_context` | Planning date, history window, lead time, metric definitions | Orchestrator |
@@ -44,6 +46,10 @@ All database code is in [`supabase/migrations`](supabase/migrations). The purcha
 - **Weeks of stock now:** (on hand + open POs) / baseline velocity.
 - **Projected at arrival:** stock left when a PO placed today lands (planned at end of week 2), in units and weeks.
 - **Promo lift:** promo-week units / the 4 normal weeks before the promo.
+
+## Skill
+
+[`skills/weekly-purchase-plan/SKILL.md`](skills/weekly-purchase-plan/SKILL.md) is the playbook Claude follows to turn the engine's draft into an approvable plan: 6 tool calls, a recommendation and owner on every flagged line, aging handoffs by team, an Excel workbook (Summary, PO Lines, Review, Aging, Notes) and a short executive summary naming trouble LPs and brands. Tested end to end against the live server: 155 formulas, zero errors, totals and row counts matching the exports. One full run pulls about 40K tokens of tool output.
 
 ## Rule checks (current run)
 
